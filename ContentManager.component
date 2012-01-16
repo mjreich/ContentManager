@@ -1,0 +1,93 @@
+<?php
+namespace ContentManager;
+
+use Cumula\BaseComponent as BaseComponent;
+
+use SqliteDataStore\SqliteDataStore as SqliteDataStore;
+use Cumula\SimpleSchema as SimpleSchema;
+
+class ContentManager extends BaseComponent {
+	
+	protected $_content_store;
+	
+	public function __construct() {
+		parent::__construct();
+		$this->addEvent('ContentItemLoad');
+		$this->addEvent('ContentItemCreate');
+		$this->addEvent('ContentItemUpdate');
+		$this->addEvent('ContentItemDelete');
+		$this->addEvent('ContentItemQuery');
+		
+		$schema = new SimpleSchema(array('uuid' => array('type' => 'integer')), 'uuid', 'content');
+		$config = array(
+			'source_directory' => DATAROOT,
+			'filename' => 'content.sqlite'
+		);
+		$this->_content_store = new SqliteDataStore($schema, $config); 
+	}
+	
+	public function startup() {
+
+	}
+	
+	public function load($id) {
+		$content = $this->_content_store->query(array('uuid' => $id));
+		if(!$content || !isset($content[0]))
+			return false;
+		$content = (object)$content[0];
+		$this->dispatch('ContentItemLoad', array($id, $content), function($new_item) use (&$content) {
+			$content = $new_item;
+		});
+		
+		return $content;
+	}
+	
+	public function create($values) {
+		$this->config->getConfigValue('total_items', 0);
+		$content = new \stdClass();
+		$content->uuid = ($this->config->getConfigValue('item_index', 0)) + 1;
+		if($this->_content_store->create($content)) {
+			$this->config->setConfigValue('item_index', $content->uuid);
+			$this->dispatch('ContentItemCreate', array($content, $values), function($new_item) use (&$content) {
+				$content = $new_item;
+			});
+			return $content;
+		} else {
+			return false;
+		}
+	}
+	
+	public function delete($id) {
+		$content = $this->_content_store->query(array('uuid' => $id));
+		if(!$content)
+			return false;
+		$content = (object)$content[0];
+		if($this->_content_store->destroy($content)) {
+			$this->dispatch('ContentItemDelete', array($id));
+			return true;
+		} else {
+			return false;
+		}
+	}
+	
+	public function update($id, $values) {
+		$content = $this->_content_store->query(array('uuid' => $id));
+		if(!$content || !isset($content[0]))
+			return false;
+		$content = (object)$content[0];
+		
+		$this->dispatch('ContentItemUpdate', array($content, $values), function($new_item) use (&$content) {
+			$content = $new_item;
+		});
+		return $content;
+	}
+	
+	public static function getInfo() {
+        return array(
+            'name' => 'Content Component',
+            'description' => 'Provides data handling API for content',
+            'version' => '0.1',
+            'dependencies' => array()
+        );
+    }
+}
