@@ -1,67 +1,201 @@
 <?php
 namespace ContentManager;
+/**
+ * ContentManager
+ *
+ * ContentManager — Provides the base implementation of an evented content model.
+ *
+ * @package    ContentManager
+ * @version    0.1.0
+ * @author     Seabourne Consulting
+ * @license    MIT License
+ * @copyright  2012 Seabourne Consulting
+ * @link       https://mjreich@github.com/mjreich/ContentManager.git
+ */
 
 use Cumula\BaseComponent as BaseComponent;
 
 use SqliteDataStore\SqliteDataStore as SqliteDataStore;
 use Cumula\SimpleSchema as SimpleSchema;
 
+/**
+ * ContentManager Class
+ *
+ * This class provides the core framework for creating event based data models.  This class basically organizes a series of events
+ * that enable other components to define and bind to a common model, defined by a 'type'.  The ContentManager keeps a common index 
+ * that stores the type and uuid for each object.
+ *
+ * ### Events
+ * The ComponentManager Class defines the following events:
+ *
+ * #### ContentItemLoad
+ * This event is fired when a content item is being loaded.  Reponders should load any relevant fields based on the content
+ * uuid, and return them.  The ContentManager will then merge those new fields into the common content object, passed to the 
+ * next event listener.
+ *
+ * **Args**:
+ * 
+ * 1. **Content**: the current Content item being loaded
+ *
+ * #### ContentItemCreate
+ * This event is fired when a content item is being created.  Responders should grab any relevant fields from the content item 
+ * and save in the local data store.
+ *
+ * **Args**:
+ * 
+ * 1. **Content**: the current Content item being created, with a uuid and type pre defined.
+ *
+ * #### ContentItemUpdate
+ * This event is fired when a content item is being updated.  Responders should save an relevant fields from the content item to
+ * the local data store.
+ *
+ * **Args**:
+ * 
+ * 1. **Content**: the current Content item being updated, with a uuid and type pre defined.
+ * 
+ * #### ContentItemDelete
+ * This event is fired when a content item is being deleted.  Responders should delete any associated information, based on the passed
+ * uuid.
+ *
+ * **Args**:
+ * 
+ * 1. **id**: the uuid of the content being deleted.
+ * 
+ * #### ContentItemQuery
+ * This event is fired when a query for content has been recieved.  The responder should run the query to the local data store and
+ * return the array of results.
+ *
+ * **Args**:
+ * 
+ * 1. **values**: a BaseDataStore compatible array of query vars.
+ *
+ * @package		ContentManager
+ * @author     Seabourne Consulting
+ */
 class ContentManager extends BaseComponent {
 	
+	//The internal content store which tracks and index of the uuids and type of each content item.
 	protected $_content_store;
 	
+	/**
+	 * Constructor
+	 *
+	 * @author Mike Reich
+	 */
 	public function __construct() {
 		parent::__construct();
+		
+		//Define events
 		$this->addEvent('ContentItemLoad');
 		$this->addEvent('ContentItemCreate');
 		$this->addEvent('ContentItemUpdate');
 		$this->addEvent('ContentItemDelete');
 		$this->addEvent('ContentItemQuery');
 		
-		$schema = new SimpleSchema(array('uuid' => array('type' => 'integer')), 'uuid', 'content');
+		//Init new simple schema describing the fields for the internal index.
+		$schema = new SimpleSchema(array('uuid' => array('type' => 'integer'), 'type' => array('type' => 'string')), 'uuid', 'content');
+		
+		//Define the config for the DATAROOT folder
 		$config = array(
 			'source_directory' => DATAROOT,
 			'filename' => 'content.sqlite'
 		);
+		
+		//Init the data store.  This can be any BaseDataStore compatible implementation.
 		$this->_content_store = new SqliteDataStore($schema, $config); 
 	}
 	
-	public function startup() {
-
-	}
+	////////////////////////////////////////////////////////
+	// Content Manager Programmatic API
+	////////////////////////////////////////////////////////	
 	
+	/**
+	 * Loads a piece of content by a UUID.
+	 *
+	 * @param string $id the uuid of the content item to load
+	 * @return object|boolean	returns the requested object or false if not found.
+	 * @author Mike Reich
+	 */
 	public function load($id) {
+		//Do an initial load of the object.
 		$content = $this->_content_store->query(array('uuid' => $id));
+		
+		//If not found, return false.
 		if(!$content || !isset($content[0]))
 			return false;
-		$content = (object)$content[0];
-		$this->dispatch('ContentItemLoad', array($id, $content), function($new_item) use (&$content) {
-			$content = $new_item;
-		});
 		
+		//Objectify the returned object in the result array	
+		$content = (object)$content[0];
+		
+		//Dispatch the ContentItemLoad event to all listeners, passing the content item.  The callback
+		//takes the returned object and merges it with the content item.
+		$this->dispatch('ContentItemLoad', array(&$content), function($new_item) use (&$content) {
+			if(is_array($new_item) || $new_item != false)
+				$content = object_merge($content, $new_item);
+		});
 		return $content;
 	}
 	
-	public function create($values) {
+	/**
+	 * Creates a new content item based on the passed type and values.
+	 *
+	 * @param string $type a string indicating the type of the new item.
+	 * @param string $values an array of key/value pairs 
+	 * @return object|boolean returns the newly created object if successful, otherwise false.
+	 * @author Mike Reich
+	 */
+	public function create($type, $values) {
+		//TODO: replace this with the PHP uuid function
 		$this->config->getConfigValue('total_items', 0);
+		
+		//Initialize the new content item as a stdClass
 		$content = new \stdClass();
+		//TODO: maybe make this the unix time + a type specific salt
 		$content->uuid = ($this->config->getConfigValue('item_index', 0)) + 1;
+		$content->type = $type;
+		
+		//Safety check, unset reserved type and uuid values if they exist
+		if(isset($values['type']))
+			unset($values['type']);
+		if(isset($values['uuid']))
+			unset($values['uuid']);
+			
+		//foreach value in the params hash, add a corresponding var to the $content	object
+		foreach($values as $key => $value) {
+			$content->$key = $value;
+		}
+		
+		//Save the content object and dispatch the event.
 		if($this->_content_store->create($content)) {
 			$this->config->setConfigValue('item_index', $content->uuid);
-			$this->dispatch('ContentItemCreate', array($content, $values), function($new_item) use (&$content) {
-				$content = $new_item;
+			
+			//Dispatch the ContentItemCreate event. Callback merges the returned content with content item.
+			$this->dispatch('ContentItemCreate', array(&$content), function($new_item) use (&$content) {
+				$content = object_merge($content, $new_item);
 			});
-			return $content;
+			return $this->load($content->uuid);
 		} else {
 			return false;
 		}
 	}
 	
+	/**
+	 * Deletes an existing content item based on the passed uuid.
+	 *
+	 * @param string $id The uuid of the content item to delete
+	 * @return boolean	returns true if successful, false if not.
+	 * @author Mike Reich
+	 */
 	public function delete($id) {
+		//Loads the content item
 		$content = $this->_content_store->query(array('uuid' => $id));
+		
+		//Returns false if it doesnt exist.
 		if(!$content)
 			return false;
 		$content = (object)$content[0];
+		
+		//If first delete is successful, dispatches the event.  Otherwise returns false.
 		if($this->_content_store->destroy($content)) {
 			$this->dispatch('ContentItemDelete', array($id));
 			return true;
@@ -70,24 +204,150 @@ class ContentManager extends BaseComponent {
 		}
 	}
 	
+	/**
+	 * Updates an existing content item based on the passed uuid with the passed values.
+	 *
+	 * @param string $id The uuid of the content item to update.
+	 * @param string $values The values to update.
+	 * @return object|boolean Returns the updated object if successful, false otherwise
+	 * @author Mike Reich
+	 */
 	public function update($id, $values) {
+		//Load the initial content item.
 		$content = $this->_content_store->query(array('uuid' => $id));
 		if(!$content || !isset($content[0]))
 			return false;
 		$content = (object)$content[0];
+
+		//Safety check, unset reserved type and uuid values if they exist
+		if(isset($values['type']))
+			unset($values['type']);
+		if(isset($values['uuid']))
+			unset($values['uuid']);
+			
+		//foreach value in the params hash, add a corresponding var to the $content	object
+		foreach($values as $key => $value) {
+			$content->$key = $value;
+		}
 		
-		$this->dispatch('ContentItemUpdate', array($content, $values), function($new_item) use (&$content) {
-			$content = $new_item;
+		//Dispatches the ContentItemUpdate event with the content item. Callback function merges the returned new item with
+		//the existing one.
+		$this->dispatch('ContentItemUpdate', array($content), function($new_item) use ($content) {
+			$content = object_merge($content, $new_item);
 		});
-		return $content;
+		
+		//Returns the fully loaded content item.
+		return $this->load($content->uuid);
 	}
 	
+
+	/**
+	 * Queries the ContentManager for a particular piece of content based on a set of passed values and options.  Sorting is handled
+	 * in code, because the entire set has to be sorted, rather than each data stores return set.
+	 *
+	 * @param string $values A BaseDataStore compatible array of query parameters.
+	 * @param string $query_type The way to inerpret the passed query values.  Options are 'AND' or 'OR'.  Complicated nested queries
+	 * are not supported.
+	 * @param string $sort	An optional field to sort the returned results by. 
+	 * @param string $order An option order with with to sort the results by.
+	 * @return array An array of results to return.
+	 * @author Mike Reich
+	 */
+	public function query($values, $query_type = 'OR', $sort = null, $order = 'ASC') {
+		//The results array that will ultimately be returned.
+		$results = array();
+		$new_query = array();
+		
+		//Figure out which of the values I should search for, eg which are defined in the datastores schema
+		$intersect_fields = array_intersect(array_keys($this->_content_store->getSchema()->getFields()), array_keys($values));
+		
+		//Set up a new query based on the available intersect_fields
+		if(count($intersect_fields) > 0) {
+			foreach($intersect_fields as $field) {
+				//TODO: support more than 'equals' option
+				$new_query[$field] = $values[$field];
+			}
+			//Run the query if fields are present
+			$results = $this->_content_store->query($new_query);
+		}
+		
+		//Dispatch the ContentItemQuery with the original values array.
+		$this->dispatch('ContentItemQuery', array($values), function($new_results) use (&$results) {
+			if(count($new_results) > 0 && is_array($results))
+				$results = array_merge($results, $new_results);
+		});
+		
+		//If there are results from the listeners, process according to the sort params.
+		if($results) {
+			//create a new temp array to store the ordered results.
+			$ordered = array();
+		
+			//remove and combine all results based on UUID, so that they are cohesive objects.
+			foreach($results as $result) {
+				$result = (array)$result;
+				if(isset($ordered[$result['uuid']]))
+					$ordered[$result['uuid']] = array_merge($ordered[$result['uuid']], $result);
+				else
+					$ordered[$result['uuid']] = $result;
+			}
+			$results = array_values($ordered);
+		}
+		
+		//If this is an AND query, we need to ensure that all results match all the values passed in.  Otherwise, the
+		//default behavior is OR and we can return the result array as is.
+		if($query_type == 'AND') {	
+			$run = array();
+			if(isset($results) && !empty($results)) {
+				foreach($results as $result) {
+					$match = true;
+					$r = (array)$result;
+					foreach($values as $key=>$value) {
+						if(!isset($r[$key]) || $r[$key] != $value) {
+							$match = false;
+							break;
+						}
+					}
+					if($match)
+						$run[] = $result;
+				}
+			}
+			$results = $run;
+		}
+		
+		//Make sure that the entirety of each object is loaded, otherwise fields not included in the values arguemnt arent included.
+		for($x = 0; $x < count($results); $x++) {
+			$results[$x] = $this->load($results[$x]['uuid']);
+		}
+		
+		//If there is a sort, we need to apply it to the entire lsit.  We use the usort function to do this.		
+		if($sort) {
+			$o = $order == 'ASC' ? 1 : -1;
+			$i = $order == 'ASC' ? -1 : 1;
+			usort($results, function($a,$b) use ($sort, $o, $i) {
+				if(isset($a->$sort) && isset($b->$sort)) {
+					return ($a->$sort > $b->$sort) ? $o : $i;
+				} else {
+					return 0;
+				}
+			});
+		}
+		
+		return $results;
+	}
+	
+	/**
+	 * The class getInfo function.
+	 *
+	 * @return void
+	 * @author Mike Reich
+	 */
 	public static function getInfo() {
         return array(
             'name' => 'Content Component',
             'description' => 'Provides data handling API for content',
             'version' => '0.1',
-            'dependencies' => array()
+            'dependencies' => array(),
+			'package' => 'Content',
         );
     }
 }
